@@ -1,11 +1,10 @@
 import os
 import sys
 import textwrap
-import winrm
 import logging
 from typing import List
 
-logger = logging.getLogger(__name__)
+import winrm
 
 
 # ---------------- CONFIG ----------------
@@ -13,7 +12,15 @@ REMOTE_DOMAIN = "dev.oneds.com"
 DOMAIN_CONTROLLER = "dev.oneds.com"  # DC FQDN
 USERNAME = os.getenv("AD_USERNAME")
 PASSWORD = os.getenv("AD_PASSWORD")
-# --------------------------------------
+# ----------------------------------------
+
+
+# Configure logger
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 
 def _build_powershell_script(computer_name: str) -> str:
@@ -47,11 +54,11 @@ def _build_powershell_script(computer_name: str) -> str:
 def delete_ad_computers(computer_names: List[str]) -> None:
     """
     Deletes AD computer objects safely.
-    Intended to be called from main AWS decommission workflow.
     """
 
     if not USERNAME or not PASSWORD:
-        raise RuntimeError("AD_USERNAME or AD_PASSWORD environment variables not set")
+        logger.error("AD_USERNAME or AD_PASSWORD environment variables not set")
+        sys.exit(1)
 
     logger.info("Starting AD cleanup for computers: %s", computer_names)
 
@@ -63,20 +70,36 @@ def delete_ad_computers(computer_names: List[str]) -> None:
             server_cert_validation="ignore"
         )
     except Exception as exc:
-        raise RuntimeError(f"Failed to establish WinRM session: {exc}") from exc
+        logger.error("Failed to establish WinRM session: %s", exc)
+        sys.exit(1)
 
     for computer in computer_names:
         logger.info("Deleting AD computer object: %s", computer)
 
         ps_script = _build_powershell_script(computer)
-        result = session.run_ps(ps_script)
+
+        try:
+            result = session.run_ps(ps_script)
+        except Exception as exc:
+            logger.error("Execution failed for %s: %s", computer, exc)
+            sys.exit(1)
 
         if result.std_out:
             logger.info(result.std_out.decode(errors="ignore"))
 
         if result.std_err:
             logger.error(result.std_err.decode(errors="ignore"))
-            raise RuntimeError(f"AD deletion failed for {computer}")
+            sys.exit(1)
 
     logger.info("AD cleanup completed successfully.")
- 
+
+
+# ---------------- MAIN ENTRY ----------------
+if __name__ == "__main__":
+
+    if len(sys.argv) < 2:
+        print("Usage: python3 cleanuptest.py <COMPUTER_NAME1> [COMPUTER_NAME2 ...]")
+        sys.exit(1)
+
+    computer_list = sys.argv[1:]
+    delete_ad_computers(computer_list)
