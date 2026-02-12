@@ -1,105 +1,90 @@
-import os
 import sys
-import textwrap
-import logging
-from typing import List
-
+import getpass
 import winrm
-
+import logging
+import textwrap
 
 # ---------------- CONFIG ----------------
-REMOTE_DOMAIN = "dev.oneds.com"
-DOMAIN_CONTROLLER = "dev.oneds.com"  # DC FQDN
-USERNAME = os.getenv("AD_USERNAME")
-PASSWORD = os.getenv("AD_PASSWORD")
+DOMAIN_CONTROLLER = "OSSMUE1-OMCDC01.staging.oneds.com"
+USERNAME = "svc.rmt.cmp.del@staging.oneds.com"
+PORT = 5986
 # ----------------------------------------
 
-
-# Configure logger
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def _build_powershell_script(computer_name: str) -> str:
+def build_script(computer_name):
     return textwrap.dedent(f"""
+        param($ComputerName)
+
+        if (-not $ComputerName) {{
+            Write-Error "ComputerName is empty"
+            exit 1
+        }}
+
         Import-Module ActiveDirectory -ErrorAction Stop
 
         try {{
-            $computer = Get-ADComputer -Identity "{computer_name}" -Properties DistinguishedName
+            $Computer = Get-ADComputer -Identity $ComputerName -Properties * -ErrorAction Stop
         }} catch {{
-            Write-Error "Computer object '{computer_name}' not found."
+            Write-Error "Computer object '$ComputerName' not found."
             exit 2
         }}
 
-        $recycleBin = Get-ADOptionalFeature -Filter 'Name -like "Recycle Bin Feature"'
+        Write-Output "Computer Found:"
+        Write-Output "Name: $($Computer.Name)"
+        Write-Output "SID: $($Computer.SID)"
+        Write-Output "ObjectGUID: $($Computer.ObjectGUID)"
+        Write-Output "DN: $($Computer.DistinguishedName)"
 
-        if (-not $recycleBin.EnabledScopes -or $recycleBin.EnabledScopes.Count -eq 0) {{
+        Write-Output "`nGroup Membership:"
+        Get-ADPrincipalGroupMembership -Identity $Computer | 
+            Select-Object -ExpandProperty Name
+
+        $recycleBinStatus = (Get-ADOptionalFeature -Filter 'Name -like "Recycle Bin Feature"').EnabledScopes
+
+        if ($recycleBinStatus.Count -gt 0) {{
+            Write-Output "`nAD Recycle Bin is ENABLED."
+        }} else {{
             Write-Error "AD Recycle Bin is NOT enabled. Aborting."
             exit 3
         }}
 
-        try {{
-            Remove-ADComputer -Identity $computer.DistinguishedName -Confirm:$false
-            Write-Output "SUCCESS: Deleted AD computer object '{computer_name}'"
-        }} catch {{
-            Write-Error "Failed to delete '{computer_name}': $_"
-            exit 4
-        }}
+        Remove-ADComputer -Identity $Computer.DistinguishedName -Confirm:$false
+        Write-Output "`nSUCCESS: Computer '$ComputerName' deleted."
     """)
 
 
-def delete_ad_computers(computer_names: List[str]) -> None:
-    """
-    Deletes AD computer objects safely.
-    """
-
-    if not USERNAME or not PASSWORD:
-        logger.error("AD_USERNAME or AD_PASSWORD environment variables not set")
-        sys.exit(1)
-
-    logger.info("Starting AD cleanup for computers: %s", computer_names)
-
-    try:
-        session = winrm.Session(
-            target=f"https://{DOMAIN_CONTROLLER}:5986/wsman",
-            auth=(USERNAME, PASSWORD),
-            transport="ntlm",
-            server_cert_validation="ignore"
-        )
-    except Exception as exc:
-        logger.error("Failed to establish WinRM session: %s", exc)
-        sys.exit(1)
-
-    for computer in computer_names:
-        logger.info("Deleting AD computer object: %s", computer)
-
-        ps_script = _build_powershell_script(computer)
-
-        try:
-            result = session.run_ps(ps_script)
-        except Exception as exc:
-            logger.error("Execution failed for %s: %s", computer, exc)
-            sys.exit(1)
-
-        if result.std_out:
-            logger.info(result.std_out.decode(errors="ignore"))
-
-        if result.std_err:
-            logger.error(result.std_err.decode(errors="ignore"))
-            sys.exit(1)
-
-    logger.info("AD cleanup completed successfully.")
-
-
-# ---------------- MAIN ENTRY ----------------
-if __name__ == "__main__":
-
+def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 cleanuptest.py <COMPUTER_NAME1> [COMPUTER_NAME2 ...]")
+        print("Usage: python3 cleanup_ad.py <COMPUTER_NAME>")
         sys.exit(1)
 
-    computer_list = sys.argv[1:]
-    delete_ad_computers(computer_list)
+    computer_name = sys.argv[1]
+
+    password = getpass.getpass("Enter AD Password: ")
+
+    session = winrm.Session(
+        target=f"https://{DOMAIN_CONTROLLER}:{PORT}/wsman",
+        auth=(USERNAME, password),
+        transport="ntlm",
+        server_cert_validation="ignore"
+    )
+
+    script = build_script(computer_name)
+
+    logger.info("Connecting to %s", DOMAIN_CONTROLLER)
+    result = session.run_ps(script, [computer_name])
+
+    if result.std_out:
+        print(result.std_out.decode())
+
+    if result.std_err:
+        print("ERROR:")
+        print(result.std_err.decode())
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
