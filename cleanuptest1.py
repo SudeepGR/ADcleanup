@@ -75,7 +75,7 @@ def main():
     script = build_script(computer_name)
 
     logger.info("Connecting to %s", DOMAIN_CONTROLLER)
-    result = session.run_ps(script, [computer_name])
+    result = session.run_ps(script)   # ✅ FIXED
 
     if result.std_out:
         print(result.std_out.decode())
